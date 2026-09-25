@@ -3,7 +3,7 @@ name: sync-cn-split-v2
 on:
   workflow_dispatch:            # 保留手动 Run workflow 按钮
   schedule:
-    - cron: '0 2 * * *'        # UTC 02:00 = 北京时间每天 10:00
+    - cron: '0 17 * * *'        # UTC 19:00 = 北京时间每天 3:00
 
 jobs:
   sync:
