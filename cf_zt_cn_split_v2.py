@@ -31,8 +31,14 @@ CF_API_TOKEN = os.getenv("CF_API_TOKEN", "").strip()
 ACCOUNT_ID = os.getenv("CF_ACCOUNT_ID", "").strip()
 DOMAIN_LIMIT = int(os.getenv("DOMAIN_LIMIT", "250"))
 IP_LIMIT = int(os.getenv("IP_LIMIT", "3650"))
-EXTRA_CIDRS = [x.strip() for x in os.getenv("EXTRA_CIDRS", "").split(",") if x.strip()]
-EXTRA_FALLBACK = [x.strip().lstrip(".").lower() for x in os.getenv("EXTRA_FALLBACK", "").split(",") if x.strip()]
+import re as _re
+
+def _split_env(s):
+    # 支持逗号 / 中文逗号 / 空格 / 分号 / 换行混用分隔
+    return [x.strip() for x in _re.split(r"[,，;；\s]+", s) if x.strip()]
+
+EXTRA_CIDRS = _split_env(os.getenv("EXTRA_CIDRS", ""))
+EXTRA_FALLBACK = [x.lstrip(".").lower() for x in _split_env(os.getenv("EXTRA_FALLBACK", ""))]
 DRY_RUN = os.getenv("DRY_RUN", "").lower() == "true"
 
 BASE = f"https://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}"
@@ -56,6 +62,13 @@ DEFAULT_FALLBACK = [
 ]
 
 # 精选：CDN 调度敏感、用户高频的国内域名（放最前面，优先占额度）
+# 国内三大运营商 IPv6 大段（GeoIP2-CN 数据源只有 v4，v6 内置维护）
+CN_V6 = [
+    "240e::/16",   # 中国电信
+    "2408::/16",   # 中国联通
+    "2409::/16",   # 中国移动
+]
+
 CURATED_CN_DOMAINS = [
     "taobao.com", "alicdn.com", "tbcdn.cn", "tmall.com", "alipay.com",
     "alipayobjects.com", "qq.com", "qpic.cn", "gtimg.cn", "qcloud.com",
@@ -154,14 +167,14 @@ def main():
     cidrs = load_cn_cidrs()
     domains = load_cn_domains()
 
-    # 域名预算：精选优先，再从大列表补足
+    # 域名预算：默认后缀 → 自定义（永远最前，不被限额挤掉）→ 精选 → 大列表补足
     fallback = list(DEFAULT_FALLBACK)
-    for d in CURATED_CN_DOMAINS + domains:
-        if len(fallback) >= DOMAIN_LIMIT:
-            break
+    for d in EXTRA_FALLBACK:
         if d not in fallback:
             fallback.append(d)
-    for d in EXTRA_FALLBACK:
+    for d in CURATED_CN_DOMAINS + domains:
+        if len(fallback) >= DOMAIN_LIMIT + len(EXTRA_FALLBACK):
+            break
         if d not in fallback:
             fallback.append(d)
 
@@ -173,13 +186,15 @@ def main():
         except ValueError:
             die(f"EXTRA_CIDRS 里有非法 CIDR：{c}")
         exclude.append({"address": c, "description": "custom"})
+    for c in CN_V6:
+        exclude.append({"address": c, "description": "CN-IPv6"})
     for c in cidrs:
-        if len(exclude) >= IP_LIMIT + len(DEFAULT_EXCLUDE) + len(EXTRA_CIDRS):
+        if len(exclude) >= IP_LIMIT + len(DEFAULT_EXCLUDE) + len(EXTRA_CIDRS) + len(CN_V6):
             break
         exclude.append({"address": c, "description": "CN"})
 
     print(f"📊 统计：fallback 域名 {len(fallback)} 条（精选 {min(len(CURATED_CN_DOMAINS), DOMAIN_LIMIT)} 条优先）")
-    print(f"📊 统计：exclude IP {len(exclude)} 条（默认 {len(DEFAULT_EXCLUDE)} + 自定义 {len(EXTRA_CIDRS)} + CN {len(exclude) - len(DEFAULT_EXCLUDE) - len(EXTRA_CIDRS)}）")
+    print(f"📊 统计：exclude IP {len(exclude)} 条（默认 {len(DEFAULT_EXCLUDE)} + 自定义 {len(EXTRA_CIDRS)} + CN-v6 {len(CN_V6)} + CN-v4 {len(exclude) - len(DEFAULT_EXCLUDE) - len(EXTRA_CIDRS) - len(CN_V6)}）")
 
     if DRY_RUN:
         print("🏁 DRY_RUN 模式，不写云端。确认无误后去掉 DRY_RUN 重跑。")
