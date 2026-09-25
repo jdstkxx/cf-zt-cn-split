@@ -43,7 +43,11 @@ DRY_RUN = os.getenv("DRY_RUN", "").lower() == "true"
 
 BASE = f"https://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}"
 
-CIDR_URL = "https://raw.githubusercontent.com/soffchen/GeoIP2-CN/release/CN-ip-cidr.csv"
+# 多源兜底：GeoIP2-CN 仓库已失效，改用 clang.cn 为主、17mon 为备
+CIDR_URLS = [
+    "https://ispip.clang.cn/all_cn.txt",
+    "https://raw.githubusercontent.com/17mon/china_ip_list/master/china_ip_list.txt",
+]
 DOMAIN_URL = "https://raw.githubusercontent.com/Loyalsoldier/surge-rules/release/direct.txt"
 
 # Cloudflare 默认的 15 条私网排除（重建 exclude 时保留，保证局域网/组播正常）
@@ -121,7 +125,17 @@ def cf_api(method, path, payload=None):
 
 def load_cn_cidrs():
     print("🔄 拉取 CN CIDR 数据...")
-    text = fetch(CIDR_URL)
+    text, used = None, None
+    for url in CIDR_URLS:
+        try:
+            text = fetch(url)
+            used = url
+            break
+        except Exception as e:
+            print(f"   ⚠️ 数据源不可用 {url}：{e}")
+    if text is None:
+        die("所有 CIDR 数据源均不可用，请检查网络或更新 CIDR_URLS")
+    print(f"   使用数据源：{used}")
     out, seen = [], set()
     for line in text.splitlines():
         c = line.strip()
