@@ -106,7 +106,8 @@ def fetch(url, timeout=60):
         return r.read().decode("utf-8", "ignore")
 
 
-def cf_api(method, path, payload=None):
+def cf_api_raw(method, path, payload=None):
+    """返回 (是否成功, 响应体文本)，不再自行退出"""
     data = json.dumps(payload).encode() if payload is not None else None
     req = urllib.request.Request(
         f"{BASE}{path}", data=data, method=method,
@@ -117,10 +118,9 @@ def cf_api(method, path, payload=None):
     )
     try:
         with urllib.request.urlopen(req, timeout=60) as r:
-            return json.loads(r.read().decode())
+            return True, r.read().decode()
     except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", "ignore")
-        die(f"Cloudflare API {method} {path} 失败 HTTP {e.code}:\n{body}")
+        return False, e.read().decode("utf-8", "ignore")
 
 
 def load_cn_cidrs():
@@ -215,8 +215,10 @@ def main():
         return
 
     print("🔄 读取当前设备策略...")
-    resp = cf_api("GET", "/devices/policy")
-    policy = resp.get("result")
+    ok, body = cf_api_raw("GET", "/devices/policy")
+    if not ok:
+        die(f"读取设备策略失败：{body[:300]}")
+    policy = json.loads(body).get("result")
     if isinstance(policy, list):
         die("API 返回了旧版列表结构，v2 只适配 2026 单对象模型，请人工确认")
     if not isinstance(policy, dict) or "policy_id" not in policy:
@@ -225,14 +227,39 @@ def main():
     policy["exclude"] = exclude
     policy["fallback_domains"] = [{"suffix": d} for d in fallback]
 
-    print("🔄 整体写回设备策略...")
-    resp = cf_api("PUT", "/devices/policy", payload=policy)
-    if resp.get("success"):
-        print(f"✅ 成功：fallback {len(fallback)} 条，exclude {len(exclude)} 条")
-        print("⏳ 策略下发到客户端最长需要 10 分钟")
-    else:
-        die(f"写入失败：{json.dumps(resp.get('errors'), ensure_ascii=False)}")
+    print("🔄 写回 Split Tunnels 排除列表...")
+    # 新模型实证端点（来自原版 cf-zt-cn-split 的成功调用）：
+    #   PUT /accounts/{aid}/devices/policy/exclude
+    #   body = 纯数组，IP 条目 {"address": cidr}，域名条目 {"host": domain}
+    #   语义：整体替换——所以数组里必须自带默认私网段和自定义条目
+    routes = exclude
+    ok, body = cf_api_raw("PUT", "/devices/policy/exclude", routes)
+    if not ok:
+        die(f"Split Tunnels 写入失败：{body[:300]}")
+    print(f"✅ Split Tunnels 写入成功：{len(routes)} 条")
 
+    print("🔄 写回 Local Domain Fallback...")
+    # fallback_domains 没有公开的新模型端点，逐级尝试；失败不阻塞主流程
+    fb = [{"suffix": d} for d in fallback]
+    fb_attempts = [
+        ("PATCH", "/devices/policy", {"fallback_domains": fb}),
+        ("PUT", "/devices/policy/fallback_domains", fb),
+    ]
+    fb_ok = False
+    fb_err = ""
+    for method, path, payload in fb_attempts:
+        ok, body = cf_api_raw(method, path, payload)
+        if ok:
+            print(f"✅ Local Domain Fallback 写入成功（{method} {path}）：{len(fb)} 条")
+            fb_ok = True
+            break
+        fb_err = f"{method} {path} -> {body[:200]}"
+        print(f"   ⚠️ {method} {path} 不通：{body[:150]}")
+    if not fb_ok:
+        print("⚠️ Local Domain Fallback 写入失败（不影响 Split Tunnels，请把此信息反馈）：")
+        print(f"   {fb_err}")
+
+    print("⏳ 策略下发到客户端最长需要 10 分钟")
 
 if __name__ == "__main__":
     main()
